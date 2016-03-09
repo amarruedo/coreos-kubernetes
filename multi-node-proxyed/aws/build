@@ -1,0 +1,26 @@
+#!/bin/bash -e
+
+COMMIT=`git rev-parse HEAD`
+TAG=$(git describe --exact-match --abbrev=0 --tags ${COMMIT} 2> /dev/null || true)
+
+if [ -z "$TAG" ]; then
+	VERSION=$COMMIT
+else
+	VERSION=$TAG
+fi
+
+# check for changed files (not untracked files)
+if [ -n "$(git diff --shortstat 2> /dev/null | tail -n1)" ]; then
+    VERSION="${VERSION}+dirty"
+fi
+
+echo "Building kube-aws ${VERSION}..."
+rm -rf ./gopath
+link_path="${PWD}/gopath/src/github.com/coreos"
+mkdir -p $link_path
+ln -s ${PWD}/../../ "${link_path}/coreos-kubernetes"
+
+GOPATH=${PWD}/Godeps/_workspace:${PWD}/gopath CGO_ENABLED=0 go build -ldflags "-X main.VERSION ${VERSION}" -a -tags netgo -installsuffix netgo -o bin/kube-aws github.com/coreos/coreos-kubernetes/multi-node/aws/cmd/kube-aws
+rm -r ./gopath
+
+echo "done"
