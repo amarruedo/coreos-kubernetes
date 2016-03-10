@@ -1,0 +1,47 @@
+global
+    log /dev/log    local0
+    log /dev/log    local1 notice
+
+    <% if @port == "443" -%>
+    # Default SSL material locations
+    ca-base /etc/haproxy/ssl
+    crt-base /etc/haproxy/ssl
+
+    # Default ciphers to use on SSL-enabled listening sockets.
+    # For more information, see ciphers(1SSL).
+    ssl-default-bind-ciphers kEECDH+aRSA+AES:kRSA+AES:+AES256:RC4-SHA:!kEDH:!LOW:!EXP:!MD5:!aNULL:!eNULL
+    <%end-%>
+
+defaults
+    log     global
+    mode    tcp
+    timeout connect 5000ms
+    timeout client 50000ms
+    timeout server 50000ms
+
+    stats enable
+    stats hide-version
+    stats scope .
+    stats realm Haproxy\ Statistics
+    stats uri /haproxy?stats
+    stats auth k8s:k8s
+
+    option contstats
+
+<% @ports.each do |port| -%>
+frontend <%= @role + "_#{port}" %>
+    bind *:<%= "#{port}" %>
+    option tcplog
+    default_backend <%= @role + "_#{port}" %>_nodes
+
+backend <%= @role + "_#{port}" %>_nodes
+    mode    tcp
+    balance roundrobin
+    <% if @port == "443" -%>
+    option  ssl-hello-chk
+    <%-end-%>
+    <% @ips.each_with_index do |ip, i| -%>
+    server <%= @role + "#{i+1} #{ip}: #{port}" %> check
+    <% end -%>
+<% end -%>
+
