@@ -1,5 +1,7 @@
 # Kubernetes on CoreOS
 
+[![Join the chat at https://gitter.im/amarruedo/coreos-kubernetes](https://badges.gitter.im/amarruedo/coreos-kubernetes.svg)](https://gitter.im/amarruedo/coreos-kubernetes?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+
 This repo contains tooling and documentation around deploying Kubernetes using CoreOS.
 Initial setup of a Kubernetes cluster is covered, but ongoing maintenance and updates of the cluster is not addressed.
 It is officially maintained by the CoreOS team and meant to be a set of introductory documentation to get a feel for using Kubernetes on CoreOS.
