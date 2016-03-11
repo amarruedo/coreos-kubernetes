@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 function define_proxy(){
@@ -23,6 +22,8 @@ ExecStart=/usr/bin/bash -c \
 <% @ports.each do |port| -%>
 <%= "-p #{port}:#{port}" -%> \
 <% end -%>
+-p 1936:1936 \
+-v /dev/log:/dev/log \
 -v /run/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro \
 haproxy:1.6"
 
