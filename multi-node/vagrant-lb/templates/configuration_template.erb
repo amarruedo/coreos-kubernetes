@@ -19,15 +19,6 @@ defaults
     timeout client 50000ms
     timeout server 50000ms
 
-    stats enable
-    stats hide-version
-    stats scope .
-    stats realm Haproxy\ Statistics
-    stats uri /haproxy?stats
-    stats auth k8s:k8s
-
-    option contstats
-
 <% @ports.each do |port| -%>
 frontend <%= @role + "_#{port}" %>
     bind *:<%= "#{port}" %>
@@ -41,7 +32,17 @@ backend <%= @role + "_#{port}" %>_nodes
     option  ssl-hello-chk
     <%-end-%>
     <% @ips.each_with_index do |ip, i| -%>
-    server <%= @role + "#{i+1} #{ip}: #{port}" %> check
+    server <%= @role + "#{i+1} #{ip}:#{port}" %> check
     <% end -%>
 <% end -%>
+
+listen <%= @role + "_stats" %> 
+    bind *:1936
+    mode http
+    stats enable
+    stats hide-version
+    stats scope .
+    stats realm Haproxy\ Statistics
+    stats uri /
+    stats auth k8s:k8s
 
