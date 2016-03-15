@@ -8,7 +8,6 @@ spec:
   ports:
     # The port that this service should serve on.
     - port: 80
-      targetPort: 9376
       nodePort: 30061
   # Label keys and values that must match in order to receive traffic for this service.
   selector:

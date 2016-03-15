@@ -148,7 +148,7 @@ Vagrant.configure("2") do |config|
       lb_service_file.write(templateUtil.service)
       lb_service_file.close
      
-      haproxy.vm.hostname = "haproxy-#{name}"
+      haproxy.vm.hostname = "lb-#{name}"
       haproxy.vm.box_check_update = true
       haproxy.vm.network "private_network", ip: parameters[:ip]
       haproxy.vm.provision :file, :source => lb_config_file.path, :destination => "/tmp/haproxy.cfg"
