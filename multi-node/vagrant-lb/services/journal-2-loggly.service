@@ -1,0 +1,23 @@
+[Unit]
+Description=Forward Systemd Journal to Loggly
+After=docker.service
+Requires=docker.service
+[Service]
+TimeoutStartSec=0
+Restart=always
+RestartSec=5
+Environment="VERSION=v0.1.1"
+ExecStartPre=-/usr/bin/docker kill journal-2-loggly
+ExecStartPre=-/usr/bin/docker rm journal-2-loggly
+ExecStartPre=/usr/bin/docker pull quay.io/glerchundi/journald-forwarder-loggly:${VERSION}
+ExecStart=/usr/bin/docker run \
+--name journal-2-loggly \
+-v /lib64:/lib64:ro \
+-v /var/log/journal:/var/log/journal:ro \
+-v /usr/share/ca-certificates:/etc/ssl/certs:ro \
+quay.io/glerchundi/journald-forwarder-loggly:${VERSION} \
+--loggly-token=159691c8-ffc3-418b-97a9-23996a52f0cc
+[Install]
+WantedBy=multi-user.target
+[X-Fleet]
+Global=true

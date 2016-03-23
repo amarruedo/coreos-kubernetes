@@ -764,6 +764,39 @@ After=flanneld.service
 EOF
     }
 
+     local TEMPLATE=/etc/systemd/system/etcd2.service.d/10-etcd.conf
+    [ -f $TEMPLATE ] || {
+        echo "TEMPLATE: $TEMPLATE"
+        mkdir -p $(dirname $TEMPLATE)
+        cat << EOF > $TEMPLATE
+[Service]
+Environment=ETCD_PROXY=on
+Environment=ETCD_LISTEN_CLIENT_URLS=http://127.0.0.1:2379
+Environment=ETCD_INITIAL_CLUSTER=$INITIAL_ETCD_CLUSTER
+EOF
+    }
+
+    local TEMPLATE=/etc/systemd/system/fleet.service.d/10-etcd.conf
+    [ -f $TEMPLATE ] || {
+        echo "TEMPLATE: $TEMPLATE"
+        mkdir -p $(dirname $TEMPLATE)
+        cat << EOF > $TEMPLATE
+[Service]
+Environment=FLEET_METADATA=role=k8s-master,hostname=$NAME
+EOF
+    }
+
+    #docker dropin: journal logging
+    local TEMPLATE=/etc/systemd/system/docker.service.d/50-docker-journal.conf
+    [ -f $TEMPLATE ] || {
+        echo "TEMPLATE: $TEMPLATE"
+        mkdir -p $(dirname $TEMPLATE)
+        cat << EOF > $TEMPLATE
+[Service] 
+Environment="DOCKER_OPTS=${DOCKER_OPTS} --log-driver=journald"
+EOF
+    }
+
 }
 
 function start_addons {
@@ -792,6 +825,8 @@ init_flannel
 systemctl stop update-engine; systemctl mask update-engine
 
 systemctl daemon-reload
+systemctl enable etcd2; systemctl start etcd2
+systemctl enable fleet; systemctl start fleet
 systemctl enable kubelet; systemctl start kubelet
 start_addons
 echo "DONE"

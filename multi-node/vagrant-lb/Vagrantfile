@@ -46,7 +46,7 @@ WORKER_HAPROXY_IP="172.17.4.203"
 ETCD_ROLE_NAME = "etcd"
 MASTER_ROLE_NAME = "master"
 WORKER_ROLE_NAME = "worker"
-ETCD_LB_PORTS = ["2379"]
+ETCD_LB_PORTS = ["2379","2380"]
 MASTER_LB_PORTS = ["443"]
 
 def etcdIP(num)
@@ -78,9 +78,6 @@ system("mkdir -p ssl && ./../../lib/init-ssl-ca ssl") or abort ("failed generati
 
 # Generate admin key/cert
 system("./../../lib/init-ssl ssl admin kube-admin") or abort("failed generating admin SSL artifacts")
-
-# tmp foler for lb configuration
-system("mkdir -p tmp")
 
 def provisionMachineSSL(machine,certBaseName,cn,ipAddrs)
   tarFile = "ssl/#{cn}.tar"
@@ -132,27 +129,32 @@ Vagrant.configure("2") do |config|
 
     config.vm.define vm_name = "lb-#{name}" do |haproxy|
 
+      env_file = Tempfile.new('env_file')
+      env_file.write("INITIAL_ETCD_CLUSTER=#{initial_etcd_cluster}\n")
+      env_file.write("NAME=lb-#{name}")
+      env_file.close
+
       # templates
       templateUtil = TemplateUtil.new(name,parameters[:ips],parameters[:ports])
       templateUtil.fillTemplates
       
       # lb configuration file
-      lb_config_file = File.new("tmp/#{name}.cfg","w+")
-      #lb_config_file = Tempfile.new("configuration") //Does not work with temp files. Why?
+      lb_config_file = Tempfile.new('configuration') 
       lb_config_file.write(templateUtil.configuration)
       lb_config_file.close
 
       # lb service file
-      lb_service_file = File.new("tmp/#{name}.sh","w+")
-      #lb_service_file = Tempfile.new("service")
+      lb_service_file = Tempfile.new('service')
       lb_service_file.write(templateUtil.service)
       lb_service_file.close
      
       haproxy.vm.hostname = "lb-#{name}"
       haproxy.vm.box_check_update = true
       haproxy.vm.network "private_network", ip: parameters[:ip]
-      haproxy.vm.provision :file, :source => lb_config_file.path, :destination => "/tmp/haproxy.cfg"
-      haproxy.vm.provision :file, :source => lb_service_file.path, :destination => "/tmp/vagrantfile-user-data"
+      haproxy.vm.provision :file, :source => env_file, :destination => "/tmp/coreos-kube-options.env"
+      haproxy.vm.provision :shell, :inline => "mkdir -p /run/coreos-kubernetes && mv /tmp/coreos-kube-options.env /run/coreos-kubernetes/options.env", :privileged => true
+      haproxy.vm.provision :file, :source => lb_config_file, :destination => "/tmp/haproxy.cfg"
+      haproxy.vm.provision :file, :source => lb_service_file, :destination => "/tmp/vagrantfile-user-data"
       haproxy.vm.provision :shell, :inline => "mkdir -p /run/haproxy && mv /tmp/haproxy.cfg /run/haproxy/haproxy.cfg", :privileged => true
       haproxy.vm.provision :shell, :inline => "mv /tmp/vagrantfile-user-data /var/lib/coreos-vagrant/", :privileged => true  
     
@@ -166,6 +168,7 @@ Vagrant.configure("2") do |config|
       data = YAML.load(IO.readlines(ETCD_CLOUD_CONFIG_PATH)[1..-1].join)
       data['coreos']['etcd2']['initial-cluster'] = initial_etcd_cluster
       data['coreos']['etcd2']['name'] = vm_name
+      data['coreos']['fleet']['metadata'] = "role=etcd,hostname=" + vm_name
       etcd_config_file = Tempfile.new('etcd_config')
       etcd_config_file.write("#cloud-config\n#{data.to_yaml}")
       etcd_config_file.close
@@ -195,6 +198,8 @@ Vagrant.configure("2") do |config|
 
       env_file = Tempfile.new('env_file')
       env_file.write("ETCD_ENDPOINTS=#{etcd_lb_endpoint}\n")
+      env_file.write("INITIAL_ETCD_CLUSTER=#{initial_etcd_cluster}\n")
+      env_file.write("NAME=#{vm_name}")
       env_file.close
 
       controller.vm.hostname = vm_name
@@ -229,7 +234,9 @@ Vagrant.configure("2") do |config|
 
       env_file = Tempfile.new('env_file')
       env_file.write("ETCD_ENDPOINTS=#{etcd_lb_endpoint}\n")
-      env_file.write("CONTROLLER_ENDPOINT=https://#{MASTER_HAPROXY_IP}") #TODO(aaron): LB or DNS across control nodes
+      env_file.write("INITIAL_ETCD_CLUSTER=#{initial_etcd_cluster}\n")
+      env_file.write("CONTROLLER_ENDPOINT=https://#{MASTER_HAPROXY_IP}\n")
+      env_file.write("NAME=#{vm_name}")
       env_file.close
 
       ["vmware_fusion", "vmware_workstation"].each do |vmware|
@@ -254,4 +261,5 @@ Vagrant.configure("2") do |config|
       worker.vm.provision :shell, :inline => "mv /tmp/vagrantfile-user-data /var/lib/coreos-vagrant/", :privileged => true
     end
   end
+
 end
