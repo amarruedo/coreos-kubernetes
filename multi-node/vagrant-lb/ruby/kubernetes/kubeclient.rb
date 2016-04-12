@@ -132,9 +132,17 @@ class Kubeclient
 
     def delete_entity(entity_type, name, namespace = nil)
       ns_prefix = build_namespace_prefix(namespace)
+      @headers['Content-Type'] = 'application/json'
       handle_exception do
+        puts ns_prefix + resource_name(entity_type) + "/#{name}"
         rest_client[ns_prefix + resource_name(entity_type) + "/#{name}"]
           .delete(@headers)
+      end
+      begin
+        result = JSON.parse(response)
+        puts result
+      rescue
+        json_error_msg = {}
       end
     end
 
@@ -154,6 +162,17 @@ class Kubeclient
         rescue
          json_error_msg = {}
         end
+      end
+    end
+
+    def update_entity(data)
+      entity_name = data['metadata']['name']
+      entity_type = data['kind']
+      ns_prefix = build_namespace_prefix(data['metadata']['namespace'])
+      @headers['Content-Type'] = 'application/json'
+      handle_exception do
+        rest_client[ns_prefix + resource_name(entity_type) + "/#{entity_name}"]
+          .put(JSON.dump(data), @headers)
       end
     end
 
@@ -184,9 +203,8 @@ class Kubeclient
 
      Dir.foreach(secrets) do |item|
       next if item == '.' or item == '..'
-      File.foreach(File.expand_path(secrets+"/"+item)) do |line|
-       secret_hash[item] = Base64.strict_encode64(line)
-      end
+      secret_content = File.read(File.expand_path(secrets+"/"+item))
+      secret_hash[item] = Base64.strict_encode64(secret_content)
      end
      secret_hash
     end
@@ -211,13 +229,40 @@ class Kubeclient
       end 
     end
 
-    # def delete_all()
-    #   ns_prefix = build_namespace_prefix(namespace)
-    #   handle_exception do
-    #     rest_client[ns_prefix + resource_name(entity_type) + "/#{name}"]
-    #       .delete(@headers)
-    #   end
-    # end
+    def update_all(entities_path)
+      entities = File.expand_path(entities_path)
+      Dir.foreach(entities) do |item|
+        next if item == '.' or item == '..'
+        complete_path = File.expand_path(entities+"/"+item)
+        documents = YAML.load_stream(IO.readlines(complete_path)[1..-1].join)    
+        documents.each do |data|
+         entity_name = data['metadata']['name']
+         entity_type = data['kind']
+         namespace = data['metadata']['namespace']
+         update_entity data         
+        end
+      end
+    end
+
+    def delete_all(entities_path)
+      entities = File.expand_path(entities_path)
+      Dir.foreach(entities) do |item|
+        next if item == '.' or item == '..'
+        complete_path = File.expand_path(entities+"/"+item)
+        documents = YAML.load_stream(IO.readlines(complete_path)[1..-1].join)    
+        documents.each do |data|
+         entity_name = data['metadata']['name']
+         entity_type = data['kind']
+         namespace = data['metadata']['namespace']        
+         if (entity_type == "ReplicationController") 
+          #hay que escalar a 0 replicas y despues borrar, si no los PODs asociados se quedan sin borrar
+          data["spec"]["replicas"] = 0
+          update_entity data
+         end
+         delete_entity entity_type, entity_name, namespace 
+        end
+      end
+    end
 
     private
 

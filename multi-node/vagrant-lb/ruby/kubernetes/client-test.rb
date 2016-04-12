@@ -25,15 +25,29 @@ SSL_OPTIONS = {
               verify_ssl:  OpenSSL::SSL::VERIFY_PEER
             }
 
-
-client = Kubeclient.new "https://#{MASTER_HAPROXY_IP}:443", "/api/" , K8S_API_VER, ssl_options: SSL_OPTIONS
-
-#esperar hasta que el API server esté levantado
-while (!client.api_valid?)
+def create_client
+ client = Kubeclient.new "https://#{MASTER_HAPROXY_IP}:443", "/api/" , K8S_API_VER, ssl_options: SSL_OPTIONS
+ while (!client.api_valid?)
   puts "Kubernetes API server is down. Retrying connection in 10 secs."
   sleep(10)
+ end
+ client
 end
 
-puts "Kubernetes API ready, starting service deployment..."
+ARGV.each do |a|
+  case a
+  when "create"
+    client = create_client
+    client.deploy_all SECRETS, ENTITIES
+  when "delete"
+    client = create_client
+    client.delete_all ENTITIES
+  when "update"
+    client = create_client
+    client.update_all ENTITIES
+  else
+    puts "Not implemented"
+  end
+end
 
-client.deploy_all SECRETS, ENTITIES
+
