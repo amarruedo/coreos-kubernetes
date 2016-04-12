@@ -1,7 +1,7 @@
 require 'erb'
 
-SERVICE_TEMPLATE_PATH = "templates/service_template.erb"
-CONFIGURATION_TEMPLATE_PATH = "templates/configuration_template.erb"
+SERVICE_TEMPLATE_PATH = File.expand_path("ruby/haproxy/service-template.erb")
+CONFIGURATION_TEMPLATE_PATH = File.expand_path("ruby/haproxy/configuration-template.erb")
 
 class TemplateUtil
 

@@ -2,3 +2,6 @@
 config.rb
 ssl/
 tmp/
+services/
+secrets/
+kubernetes-files/

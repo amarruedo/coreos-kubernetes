@@ -1,28 +1,25 @@
 #!/bin/bash
 
 # The above settings can optionally be overridden using an environment file:
-ENV_FILE=/run/coreos-kubernetes/options.env
+ENV_FILE=/run/coreos-lb/options.env
 
 function init_config(){
-	
+
+    local REQUIRED=('ETCD_ENDPOINTS')
+
 	if [ -f $ENV_FILE ]; then
         export $(cat $ENV_FILE | xargs)
     fi
+
+    for REQ in "${REQUIRED[@]}"; do
+        if [ -z "$(eval echo \$$REQ)" ]; then
+            echo "Missing required config value: ${REQ}"
+            exit 1
+        fi
+    done
 }
 
 function init_templates(){
-
-	local TEMPLATE=/etc/systemd/system/etcd2.service.d/10-etcd.conf
-    [ -f $TEMPLATE ] || {
-        echo "TEMPLATE: $TEMPLATE"
-        mkdir -p $(dirname $TEMPLATE)
-        cat << EOF > $TEMPLATE
-[Service]
-Environment=ETCD_PROXY=on
-Environment=ETCD_LISTEN_CLIENT_URLS=http://127.0.0.1:8081
-Environment=ETCD_INITIAL_CLUSTER=$INITIAL_ETCD_CLUSTER
-EOF
-    }
 
     local TEMPLATE=/etc/systemd/system/fleet.service.d/10-etcd.conf
     [ -f $TEMPLATE ] || {
@@ -30,7 +27,7 @@ EOF
         mkdir -p $(dirname $TEMPLATE)
         cat << EOF > $TEMPLATE
 [Service]
-Environment=FLEET_ETCD_SERVERS=http://127.0.0.1:8081
+Environment=FLEET_ETCD_SERVERS=$ETCD_ENDPOINTS
 Environment=FLEET_METADATA=role=lb,hostname=$NAME
 EOF
     }
@@ -58,8 +55,8 @@ After=docker.service
 Requires=docker.service
 [Service]
 TimeoutStartSec=0
-ExecStartPre=-/usr/bin/docker kill haproxy:1.6
-ExecStartPre=-/usr/bin/docker rm haproxy:1.6
+ExecStartPre=-/usr/bin/docker kill haproxy
+ExecStartPre=-/usr/bin/docker rm haproxy
 ExecStartPre=/usr/bin/docker pull haproxy:1.6
 ExecStart=/usr/bin/bash -c \
 "/usr/bin/docker run -d --name haproxy \
@@ -82,6 +79,5 @@ init_templates
 
 systemctl stop update-engine; systemctl mask update-engine
 systemctl daemon-reload
-systemctl enable etcd2; systemctl start etcd2
 systemctl enable fleet; systemctl start fleet
 systemctl enable haproxy.service; systemctl start haproxy.service
