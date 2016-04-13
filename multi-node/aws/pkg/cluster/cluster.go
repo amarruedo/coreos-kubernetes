@@ -2,14 +2,23 @@ package cluster
 
 import (
 	"bytes"
-	"encoding/base64"
+	"errors"
 	"fmt"
 	"text/tabwriter"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/route53"
+
+	"github.com/coreos/coreos-kubernetes/multi-node/aws/pkg/config"
 )
+
+// set by build script
+var VERSION = "UNKNOWN"
 
 type ClusterInfo struct {
 	Name         string
@@ -28,225 +37,293 @@ func (c *ClusterInfo) String() string {
 	return buf.String()
 }
 
-type TLSConfig struct {
-	CACertFile string
-	CACert     []byte
+func New(cfg *config.Cluster, awsDebug bool) *Cluster {
+	awsConfig := aws.NewConfig().
+		WithRegion(cfg.Region).
+		WithCredentialsChainVerboseErrors(true)
 
-	APIServerCertFile string
-	APIServerCert     []byte
-	APIServerKeyFile  string
-	APIServerKey      []byte
+	if awsDebug {
+		awsConfig = awsConfig.WithLogLevel(aws.LogDebug)
+	}
 
-	WorkerCertFile string
-	WorkerCert     []byte
-	WorkerKeyFile  string
-	WorkerKey      []byte
-
-	AdminCertFile string
-	AdminCert     []byte
-	AdminKeyFile  string
-	AdminKey      []byte
-}
-
-func New(cfg *Config, awsConfig *aws.Config) *Cluster {
 	return &Cluster{
-		cfg: cfg,
-		aws: awsConfig,
+		Cluster: *cfg,
+		session: session.New(awsConfig),
 	}
 }
 
 type Cluster struct {
-	cfg *Config
-	aws *aws.Config
+	config.Cluster
+	session *session.Session
 }
 
-func (c *Cluster) stackName() string {
-	return c.cfg.ClusterName
+func (c *Cluster) ValidateStack(stackBody string) (string, error) {
+	validateInput := cloudformation.ValidateTemplateInput{
+		TemplateBody: &stackBody,
+	}
+
+	cfSvc := cloudformation.New(c.session)
+	validationReport, err := cfSvc.ValidateTemplate(&validateInput)
+	if err != nil {
+		return "", fmt.Errorf("invalid cloudformation stack: %v", err)
+	}
+
+	return validationReport.String(), nil
 }
 
-func (c *Cluster) Create(tlsConfig *TLSConfig) error {
-	parameters := []*cloudformation.Parameter{
-		{
-			ParameterKey:     aws.String(parClusterName),
-			ParameterValue:   aws.String(c.stackName()),
-			UsePreviousValue: aws.Bool(true),
+type ec2Service interface {
+	DescribeVpcs(*ec2.DescribeVpcsInput) (*ec2.DescribeVpcsOutput, error)
+	DescribeSubnets(*ec2.DescribeSubnetsInput) (*ec2.DescribeSubnetsOutput, error)
+	DescribeKeyPairs(*ec2.DescribeKeyPairsInput) (*ec2.DescribeKeyPairsOutput, error)
+}
+
+func (c *Cluster) validateExistingVPCState(ec2Svc ec2Service) error {
+	if c.VPCID == "" {
+		//The VPC will be created. No existing state to validate
+		return nil
+	}
+
+	describeVpcsInput := ec2.DescribeVpcsInput{
+		VpcIds: []*string{aws.String(c.VPCID)},
+	}
+	vpcOutput, err := ec2Svc.DescribeVpcs(&describeVpcsInput)
+	if err != nil {
+		return fmt.Errorf("error describing existing vpc: %v", err)
+	}
+	if len(vpcOutput.Vpcs) == 0 {
+		return fmt.Errorf("could not find vpc %s in region %s", c.VPCID, c.Region)
+	}
+	if len(vpcOutput.Vpcs) > 1 {
+		//Theoretically this should never happen. If it does, we probably want to know.
+		return fmt.Errorf("found more than one vpc with id %s. this is NOT NORMAL.", c.VPCID)
+	}
+
+	existingVPC := vpcOutput.Vpcs[0]
+
+	if *existingVPC.CidrBlock != c.VPCCIDR {
+		//If this is the case, our network config validation cannot be trusted and we must abort
+		return fmt.Errorf("configured vpcCidr (%s) does not match actual existing vpc cidr (%s)", c.VPCCIDR, *existingVPC.CidrBlock)
+	}
+
+	describeSubnetsInput := ec2.DescribeSubnetsInput{
+		Filters: []*ec2.Filter{
+			{
+				Name:   aws.String("vpc-id"),
+				Values: []*string{existingVPC.VpcId},
+			},
 		},
-		{
-			ParameterKey:     aws.String(parNameKeyName),
-			ParameterValue:   aws.String(c.cfg.KeyName),
-			UsePreviousValue: aws.Bool(true),
-		},
-		{
-			ParameterKey:     aws.String(parArtifactURL),
-			ParameterValue:   aws.String(c.cfg.ArtifactURL),
-			UsePreviousValue: aws.Bool(true),
-		},
-		{
-			ParameterKey:     aws.String(parCACert),
-			ParameterValue:   aws.String(base64.StdEncoding.EncodeToString(tlsConfig.CACert)),
-			UsePreviousValue: aws.Bool(true),
-		},
-		{
-			ParameterKey:     aws.String(parAPIServerCert),
-			ParameterValue:   aws.String(base64.StdEncoding.EncodeToString(tlsConfig.APIServerCert)),
-			UsePreviousValue: aws.Bool(true),
-		},
-		{
-			ParameterKey:     aws.String(parAPIServerKey),
-			ParameterValue:   aws.String(base64.StdEncoding.EncodeToString(tlsConfig.APIServerKey)),
-			UsePreviousValue: aws.Bool(true),
-		},
-		{
-			ParameterKey:     aws.String(parWorkerCert),
-			ParameterValue:   aws.String(base64.StdEncoding.EncodeToString(tlsConfig.WorkerCert)),
-			UsePreviousValue: aws.Bool(true),
-		},
-		{
-			ParameterKey:     aws.String(parWorkerKey),
-			ParameterValue:   aws.String(base64.StdEncoding.EncodeToString(tlsConfig.WorkerKey)),
-			UsePreviousValue: aws.Bool(true),
-		},
 	}
 
-	if c.cfg.ReleaseChannel != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parNameReleaseChannel),
-			ParameterValue:   aws.String(c.cfg.ReleaseChannel),
-			UsePreviousValue: aws.Bool(true),
-		})
+	subnetOutput, err := ec2Svc.DescribeSubnets(&describeSubnetsInput)
+	if err != nil {
+		return fmt.Errorf("error describing subnets for vpc: %v", err)
 	}
 
-	if c.cfg.ControllerInstanceType != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parNameControllerInstanceType),
-			ParameterValue:   aws.String(c.cfg.ControllerInstanceType),
-			UsePreviousValue: aws.Bool(true),
-		})
+	subnetCIDRS := make([]string, len(subnetOutput.Subnets))
+	for i, existingSubnet := range subnetOutput.Subnets {
+		subnetCIDRS[i] = *existingSubnet.CidrBlock
 	}
 
-	if c.cfg.ControllerRootVolumeSize > 0 {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parNameControllerRootVolumeSize),
-			ParameterValue:   aws.String(fmt.Sprintf("%d", c.cfg.ControllerRootVolumeSize)),
-			UsePreviousValue: aws.Bool(true),
-		})
+	if err := c.ValidateExistingVPC(*existingVPC.CidrBlock, subnetCIDRS); err != nil {
+		return fmt.Errorf("error validating existing VPC: %v", err)
 	}
 
-	if c.cfg.WorkerCount > 0 {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parWorkerCount),
-			ParameterValue:   aws.String(fmt.Sprintf("%d", c.cfg.WorkerCount)),
-			UsePreviousValue: aws.Bool(true),
-		})
+	return nil
+}
+
+func (c *Cluster) Create(stackBody string) error {
+	r53Svc := route53.New(c.session)
+	if err := c.validateDNSConfig(r53Svc); err != nil {
+		return err
 	}
 
-	if c.cfg.WorkerInstanceType != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parNameWorkerInstanceType),
-			ParameterValue:   aws.String(c.cfg.WorkerInstanceType),
-			UsePreviousValue: aws.Bool(true),
-		})
+	ec2Svc := ec2.New(c.session)
+
+	if err := c.validateKeyPair(ec2Svc); err != nil {
+		return err
 	}
 
-	if c.cfg.WorkerRootVolumeSize > 0 {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parNameWorkerRootVolumeSize),
-			ParameterValue:   aws.String(fmt.Sprintf("%d", c.cfg.WorkerRootVolumeSize)),
-			UsePreviousValue: aws.Bool(true),
-		})
+	if err := c.validateExistingVPCState(ec2Svc); err != nil {
+		return err
 	}
 
-	if c.cfg.WorkerSpotPrice != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parWorkerSpotPrice),
-			ParameterValue:   aws.String(c.cfg.WorkerSpotPrice),
-			UsePreviousValue: aws.Bool(true),
-		})
+	cfSvc := cloudformation.New(c.session)
+	creq := &cloudformation.CreateStackInput{
+		StackName:    aws.String(c.ClusterName),
+		OnFailure:    aws.String("DO_NOTHING"),
+		Capabilities: []*string{aws.String(cloudformation.CapabilityCapabilityIam)},
+		TemplateBody: &stackBody,
 	}
 
-	if c.cfg.AvailabilityZone != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parAvailabilityZone),
-			ParameterValue:   aws.String(c.cfg.AvailabilityZone),
-			UsePreviousValue: aws.Bool(true),
-		})
+	resp, err := cfSvc.CreateStack(creq)
+	if err != nil {
+		return err
 	}
 
-	if c.cfg.VPCCIDR != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parVPCCIDR),
-			ParameterValue:   aws.String(c.cfg.VPCCIDR),
-			UsePreviousValue: aws.Bool(true),
-		})
+	req := cloudformation.DescribeStacksInput{
+		StackName: resp.StackId,
+	}
+	for {
+		resp, err := cfSvc.DescribeStacks(&req)
+		if err != nil {
+			return err
+		}
+		if len(resp.Stacks) == 0 {
+			return fmt.Errorf("stack not found")
+		}
+		statusString := aws.StringValue(resp.Stacks[0].StackStatus)
+		switch statusString {
+		case cloudformation.ResourceStatusCreateComplete:
+			return nil
+		case cloudformation.ResourceStatusCreateFailed:
+			errMsg := fmt.Sprintf(
+				"Stack creation failed: %s : %s",
+				statusString,
+				aws.StringValue(resp.Stacks[0].StackStatusReason),
+			)
+			return errors.New(errMsg)
+		case cloudformation.ResourceStatusCreateInProgress:
+			time.Sleep(3 * time.Second)
+			continue
+		default:
+			return fmt.Errorf("unexpected stack status: %s", statusString)
+		}
+	}
+}
+
+func (c *Cluster) Update(stackBody string) (string, error) {
+	cfSvc := cloudformation.New(c.session)
+	input := &cloudformation.UpdateStackInput{
+		Capabilities: []*string{aws.String(cloudformation.CapabilityCapabilityIam)},
+		StackName:    aws.String(c.ClusterName),
+		TemplateBody: &stackBody,
 	}
 
-	if c.cfg.InstanceCIDR != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parInstanceCIDR),
-			ParameterValue:   aws.String(c.cfg.InstanceCIDR),
-			UsePreviousValue: aws.Bool(true),
-		})
+	updateOutput, err := cfSvc.UpdateStack(input)
+	if err != nil {
+		return "", fmt.Errorf("error updating cloudformation stack: %v", err)
 	}
-
-	if c.cfg.ControllerIP != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parControllerIP),
-			ParameterValue:   aws.String(c.cfg.ControllerIP),
-			UsePreviousValue: aws.Bool(true),
-		})
+	req := cloudformation.DescribeStacksInput{
+		StackName: updateOutput.StackId,
 	}
-
-	if c.cfg.PodCIDR != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parPodCIDR),
-			ParameterValue:   aws.String(c.cfg.PodCIDR),
-			UsePreviousValue: aws.Bool(true),
-		})
+	for {
+		resp, err := cfSvc.DescribeStacks(&req)
+		if err != nil {
+			return "", err
+		}
+		if len(resp.Stacks) == 0 {
+			return "", fmt.Errorf("stack not found")
+		}
+		statusString := aws.StringValue(resp.Stacks[0].StackStatus)
+		switch statusString {
+		case cloudformation.ResourceStatusUpdateComplete:
+			return updateOutput.String(), nil
+		case cloudformation.ResourceStatusUpdateFailed, cloudformation.StackStatusUpdateRollbackComplete, cloudformation.StackStatusUpdateRollbackFailed:
+			errMsg := fmt.Sprintf("Stack status: %s : %s", statusString, aws.StringValue(resp.Stacks[0].StackStatusReason))
+			return "", errors.New(errMsg)
+		case cloudformation.ResourceStatusUpdateInProgress:
+			time.Sleep(3 * time.Second)
+			continue
+		default:
+			return "", fmt.Errorf("unexpected stack status: %s", statusString)
+		}
 	}
-
-	if c.cfg.ServiceCIDR != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parServiceCIDR),
-			ParameterValue:   aws.String(c.cfg.ServiceCIDR),
-			UsePreviousValue: aws.Bool(true),
-		})
-	}
-
-	if c.cfg.KubernetesServiceIP != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parKubernetesServiceIP),
-			ParameterValue:   aws.String(c.cfg.KubernetesServiceIP),
-			UsePreviousValue: aws.Bool(true),
-		})
-	}
-
-	if c.cfg.DNSServiceIP != "" {
-		parameters = append(parameters, &cloudformation.Parameter{
-			ParameterKey:     aws.String(parDNSServiceIP),
-			ParameterValue:   aws.String(c.cfg.DNSServiceIP),
-			UsePreviousValue: aws.Bool(true),
-		})
-	}
-
-	tmplURL := fmt.Sprintf("%s/template.json", c.cfg.ArtifactURL)
-	return createStackAndWait(cloudformation.New(c.aws), c.stackName(), tmplURL, parameters)
 }
 
 func (c *Cluster) Info() (*ClusterInfo, error) {
-	resources, err := getStackResources(cloudformation.New(c.aws), c.stackName())
+	cfSvc := cloudformation.New(c.session)
+	resp, err := cfSvc.DescribeStackResource(
+		&cloudformation.DescribeStackResourceInput{
+			LogicalResourceId: aws.String("EIPController"),
+			StackName:         aws.String(c.ClusterName),
+		},
+	)
 	if err != nil {
-		return nil, err
+		errmsg := "unable to get public IP of controller instance:\n" + err.Error()
+		return nil, fmt.Errorf(errmsg)
 	}
 
-	info, err := mapStackResourcesToClusterInfo(ec2.New(c.aws), resources)
-	if err != nil {
-		return nil, err
-	}
-
-	info.Name = c.cfg.ClusterName
-	return info, nil
+	var info ClusterInfo
+	info.ControllerIP = *resp.StackResourceDetail.PhysicalResourceId
+	info.Name = c.ClusterName
+	return &info, nil
 }
 
 func (c *Cluster) Destroy() error {
-	return destroyStack(cloudformation.New(c.aws), c.stackName())
+	cfSvc := cloudformation.New(c.session)
+	dreq := &cloudformation.DeleteStackInput{
+		StackName: aws.String(c.ClusterName),
+	}
+	_, err := cfSvc.DeleteStack(dreq)
+	return err
+}
+
+func (c *Cluster) validateKeyPair(ec2Svc ec2Service) error {
+	_, err := ec2Svc.DescribeKeyPairs(&ec2.DescribeKeyPairsInput{
+		KeyNames: []*string{aws.String(c.KeyName)},
+	})
+
+	if err != nil {
+		if awsErr, ok := err.(awserr.Error); ok {
+			if awsErr.Code() == "InvalidKeyPair.NotFound" {
+				return fmt.Errorf("Key %s does not exist.", c.KeyName)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+type r53Service interface {
+	ListHostedZonesByName(*route53.ListHostedZonesByNameInput) (*route53.ListHostedZonesByNameOutput, error)
+	ListResourceRecordSets(*route53.ListResourceRecordSetsInput) (*route53.ListResourceRecordSetsOutput, error)
+}
+
+func (c *Cluster) validateDNSConfig(r53 r53Service) error {
+	if !c.CreateRecordSet {
+		return nil
+	}
+
+	if c.RecordSetTTL < 1 {
+		return fmt.Errorf("TTL must be at least 1 second")
+	}
+
+	if c.HostedZone == "" {
+		return fmt.Errorf("hostName cannot be blank when createRecordSet is true")
+	}
+
+	zonesResp, err := r53.ListHostedZonesByName(&route53.ListHostedZonesByNameInput{
+		DNSName: aws.String(c.HostedZone),
+	})
+	if err != nil {
+		return fmt.Errorf("Error validating HostedZone: %s", err)
+	}
+
+	zones := zonesResp.HostedZones
+	if len(zones) == 0 || (*zones[0].Name != c.HostedZone) {
+		return fmt.Errorf(
+			"HostedZone %s does not exist.  You'll need to create it manually",
+			c.HostedZone,
+		)
+	}
+
+	recordSetsResp, err := r53.ListResourceRecordSets(
+		&route53.ListResourceRecordSetsInput{
+			HostedZoneId: zones[0].Id,
+		},
+	)
+
+	if len(recordSetsResp.ResourceRecordSets) > 0 {
+		for _, recordSet := range recordSetsResp.ResourceRecordSets {
+			if *recordSet.Name == c.ExternalDNSName {
+				return fmt.Errorf(
+					"RecordSet for \"%s\" already exists in Hosted Zone \"%s.\"",
+					c.ExternalDNSName,
+					c.HostedZone,
+				)
+			}
+		}
+	}
+
+	return nil
 }

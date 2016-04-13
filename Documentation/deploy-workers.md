@@ -90,7 +90,7 @@ ExecStartPre=/usr/bin/mkdir -p /etc/kubernetes/manifests
 
 Environment=KUBELET_VERSION=${K8S_VER}
 ExecStart=/usr/lib/coreos/kubelet-wrapper \
-  --api_servers=https://${MASTER_HOST} \
+  --api-servers=https://${MASTER_HOST} \
   --register-node=true \
   --allow-privileged=true \
   --config=/etc/kubernetes/manifests \
@@ -124,7 +124,7 @@ spec:
   hostNetwork: true
   containers:
   - name: kube-proxy
-    image: quay.io/coreos/hyperkube:v1.1.8_coreos.0
+    image: quay.io/coreos/hyperkube:v1.2.0_coreos.1
     command:
     - /hyperkube
     - proxy
