@@ -45,6 +45,10 @@ ARGV.each do |a|
   when "update"
     client = create_client
     client.update_all ENTITIES
+  when "custom"
+    
+    client = create_client
+    client.create_entity "../../kubernetes-files/kubernetes-dashboard.yaml"
   else
     puts "Not implemented"
   end

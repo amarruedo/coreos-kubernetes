@@ -146,22 +146,44 @@ class Kubeclient
       end
     end
 
+    def delete_entity_ex(data)
+     entity_name = data['metadata']['name']
+     entity_type = data['kind']
+     namespace = data['metadata']['namespace']        
+     if (entity_type == "ReplicationController") 
+      #hay que escalar a 0 replicas y despues borrar, si no los PODs asociados se quedan sin borrar
+      data["spec"]["replicas"] = 0
+      update_entity data
+     end
+     delete_entity entity_type, entity_name, namespace 
+    end
+
     def create_entity(entity_config_path)
       documents = YAML.load_stream(IO.readlines(File.expand_path(entity_config_path))[1..-1].join)
       documents.each do |data|
         puts data.inspect
-        ns_prefix = build_namespace_prefix(data['metadata']['namespace'])
-        entity_type = data['kind']
-        @headers['Content-Type'] = 'application/json'
-        response = handle_exception do
-         rest_client[ns_prefix + resource_name(entity_type)]
-         .post(JSON.dump(data), @headers)
-        end
-        begin
-         result = JSON.parse(response)
-        rescue
-         json_error_msg = {}
-        end
+        if data['kind'] == "List" then
+          data['items'].each do |item|
+           create_entity_ex(item)
+          end
+        else
+          create_entity_ex(data)
+        end    
+      end
+    end
+
+    def create_entity_ex(data)
+      ns_prefix = build_namespace_prefix(data['metadata']['namespace'])
+      entity_type = data['kind']
+      @headers['Content-Type'] = 'application/json'
+      response = handle_exception do
+        rest_client[ns_prefix + resource_name(entity_type)]
+          .post(JSON.dump(data), @headers)
+      end
+      begin
+        result = JSON.parse(response)
+      rescue
+        json_error_msg = {}
       end
     end
 
@@ -251,15 +273,13 @@ class Kubeclient
         complete_path = File.expand_path(entities+"/"+item)
         documents = YAML.load_stream(IO.readlines(complete_path)[1..-1].join)    
         documents.each do |data|
-         entity_name = data['metadata']['name']
-         entity_type = data['kind']
-         namespace = data['metadata']['namespace']        
-         if (entity_type == "ReplicationController") 
-          #hay que escalar a 0 replicas y despues borrar, si no los PODs asociados se quedan sin borrar
-          data["spec"]["replicas"] = 0
-          update_entity data
-         end
-         delete_entity entity_type, entity_name, namespace 
+         if data['kind'] == "List" then
+          data['items'].each do |item|
+           delete_entity_ex(item)
+          end
+         else
+          delete_entity_ex(data)
+         end        
         end
       end
     end

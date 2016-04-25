@@ -65,7 +65,7 @@ ExecStart=/usr/bin/bash -c \
 <% end -%>
 -p 1936:1936 \
 -v /dev/log:/dev/log \
--v /run/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro \
+-v /etc/haproxy:/usr/local/etc/haproxy:ro \
 haproxy:1.6"
 
 [Install]

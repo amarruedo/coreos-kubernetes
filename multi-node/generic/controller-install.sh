@@ -526,18 +526,19 @@ EOF
             "command": [
               "/heapster",
               "--source=kubernetes.summary_api:''",
-              "--metric_resolution=60s"
+              "--metric_resolution=30s",
+              "--sink=influxdb:http://monitoring-influxdb:8086"
             ],
             "image": "gcr.io/google_containers/heapster:v1.0.2",
             "name": "heapster",
             "resources": {
               "limits": {
                 "cpu": "100m",
-                "memory": "208Mi"
+                "memory": "212Mi"
               },
               "requests": {
                 "cpu": "100m",
-                "memory": "208Mi"
+                "memory": "212Mi"
               }
             }
           }
