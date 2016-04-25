@@ -148,14 +148,8 @@ func (c *Cluster) Create(stackBody string) error {
 	}
 
 	cfSvc := cloudformation.New(c.session)
-	creq := &cloudformation.CreateStackInput{
-		StackName:    aws.String(c.ClusterName),
-		OnFailure:    aws.String("DO_NOTHING"),
-		Capabilities: []*string{aws.String(cloudformation.CapabilityCapabilityIam)},
-		TemplateBody: &stackBody,
-	}
 
-	resp, err := cfSvc.CreateStack(creq)
+	resp, err := c.createStack(cfSvc, stackBody)
 	if err != nil {
 		return err
 	}
@@ -189,6 +183,30 @@ func (c *Cluster) Create(stackBody string) error {
 			return fmt.Errorf("unexpected stack status: %s", statusString)
 		}
 	}
+}
+
+type cloudformationService interface {
+	CreateStack(*cloudformation.CreateStackInput) (*cloudformation.CreateStackOutput, error)
+}
+
+func (c *Cluster) createStack(cfSvc cloudformationService, stackBody string) (*cloudformation.CreateStackOutput, error) {
+
+	var tags []*cloudformation.Tag
+	for k, v := range c.StackTags {
+		key := k
+		value := v
+		tags = append(tags, &cloudformation.Tag{Key: &key, Value: &value})
+	}
+
+	creq := &cloudformation.CreateStackInput{
+		StackName:    aws.String(c.ClusterName),
+		OnFailure:    aws.String("DO_NOTHING"),
+		Capabilities: []*string{aws.String(cloudformation.CapabilityCapabilityIam)},
+		TemplateBody: &stackBody,
+		Tags:         tags,
+	}
+
+	return cfSvc.CreateStack(creq)
 }
 
 func (c *Cluster) Update(stackBody string) (string, error) {
@@ -284,14 +302,6 @@ func (c *Cluster) validateDNSConfig(r53 r53Service) error {
 		return nil
 	}
 
-	if c.RecordSetTTL < 1 {
-		return fmt.Errorf("TTL must be at least 1 second")
-	}
-
-	if c.HostedZone == "" {
-		return fmt.Errorf("hostName cannot be blank when createRecordSet is true")
-	}
-
 	zonesResp, err := r53.ListHostedZonesByName(&route53.ListHostedZonesByNameInput{
 		DNSName: aws.String(c.HostedZone),
 	})
@@ -315,7 +325,7 @@ func (c *Cluster) validateDNSConfig(r53 r53Service) error {
 
 	if len(recordSetsResp.ResourceRecordSets) > 0 {
 		for _, recordSet := range recordSetsResp.ResourceRecordSets {
-			if *recordSet.Name == c.ExternalDNSName {
+			if *recordSet.Name == config.WithTrailingDot(c.ExternalDNSName) {
 				return fmt.Errorf(
 					"RecordSet for \"%s\" already exists in Hosted Zone \"%s.\"",
 					c.ExternalDNSName,

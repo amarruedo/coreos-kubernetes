@@ -37,7 +37,7 @@ func newDefaultCluster() *Cluster {
 		PodCIDR:                  "10.2.0.0/16",
 		ServiceCIDR:              "10.3.0.0/24",
 		DNSServiceIP:             "10.3.0.10",
-		K8sVer:                   "v1.2.0_coreos.1",
+		K8sVer:                   "v1.2.2_coreos.0",
 		HyperkubeImageRepo:       "quay.io/coreos/hyperkube",
 		ControllerInstanceType:   "m3.medium",
 		ControllerRootVolumeSize: 30,
@@ -45,6 +45,7 @@ func newDefaultCluster() *Cluster {
 		WorkerInstanceType:       "m3.medium",
 		WorkerRootVolumeSize:     30,
 		CreateRecordSet:          false,
+		RecordSetTTL:             300,
 	}
 }
 
@@ -59,22 +60,20 @@ func ClusterFromFile(filename string) (*Cluster, error) {
 		return nil, fmt.Errorf("file %s: %v", filename, err)
 	}
 
-	// HostedZone needs to end with a '.'
-	c.HostedZone = withTrailingDot(c.HostedZone)
-
-	// ExternalDNSName doesn't require '.' to be created,
-	// but adding it here makes validations easier
-	c.ExternalDNSName = withTrailingDot(c.ExternalDNSName)
-
 	return c, nil
 }
 
-//Necessary for unit tests, which store configs as hardcoded strings
+// ClusterFromBytes Necessary for unit tests, which store configs as hardcoded strings
 func ClusterFromBytes(data []byte) (*Cluster, error) {
 	c := newDefaultCluster()
 	if err := yaml.Unmarshal(data, c); err != nil {
 		return nil, fmt.Errorf("failed to parse cluster: %v", err)
 	}
+
+	// HostedZone needs to end with a '.', amazon will not append it for you.
+	// as it will with RecordSets
+	c.HostedZone = WithTrailingDot(c.HostedZone)
+
 	if err := c.valid(); err != nil {
 		return nil, fmt.Errorf("invalid cluster: %v", err)
 	}
@@ -82,38 +81,44 @@ func ClusterFromBytes(data []byte) (*Cluster, error) {
 }
 
 type Cluster struct {
-	ClusterName              string `yaml:"clusterName"`
-	ExternalDNSName          string `yaml:"externalDNSName"`
-	KeyName                  string `yaml:"keyName"`
-	Region                   string `yaml:"region"`
-	AvailabilityZone         string `yaml:"availabilityZone"`
-	ReleaseChannel           string `yaml:"releaseChannel"`
-	ControllerInstanceType   string `yaml:"controllerInstanceType"`
-	ControllerRootVolumeSize int    `yaml:"controllerRootVolumeSize"`
-	WorkerCount              int    `yaml:"workerCount"`
-	WorkerInstanceType       string `yaml:"workerInstanceType"`
-	WorkerRootVolumeSize     int    `yaml:"workerRootVolumeSize"`
-	WorkerSpotPrice          string `yaml:"workerSpotPrice"`
-	VPCID                    string `yaml:"vpcId"`
-	RouteTableID             string `yaml:"routeTableId"`
-	VPCCIDR                  string `yaml:"vpcCIDR"`
-	InstanceCIDR             string `yaml:"instanceCIDR"`
-	ControllerIP             string `yaml:"controllerIP"`
-	PodCIDR                  string `yaml:"podCIDR"`
-	ServiceCIDR              string `yaml:"serviceCIDR"`
-	DNSServiceIP             string `yaml:"dnsServiceIP"`
-	K8sVer                   string `yaml:"kubernetesVersion"`
-	HyperkubeImageRepo       string `yaml:"hyperkubeImageRepo"`
-	KMSKeyARN                string `yaml:"kmsKeyArn"`
-
-	CreateRecordSet bool   `yaml:"createRecordSet"`
-	RecordSetTTL    int    `yaml:"recordSetTTL"`
-	HostedZone      string `yaml:"hostedZone"`
+	ClusterName              string            `yaml:"clusterName"`
+	ExternalDNSName          string            `yaml:"externalDNSName"`
+	KeyName                  string            `yaml:"keyName"`
+	Region                   string            `yaml:"region"`
+	AvailabilityZone         string            `yaml:"availabilityZone"`
+	ReleaseChannel           string            `yaml:"releaseChannel"`
+	ControllerInstanceType   string            `yaml:"controllerInstanceType"`
+	ControllerRootVolumeSize int               `yaml:"controllerRootVolumeSize"`
+	WorkerCount              int               `yaml:"workerCount"`
+	WorkerInstanceType       string            `yaml:"workerInstanceType"`
+	WorkerRootVolumeSize     int               `yaml:"workerRootVolumeSize"`
+	WorkerSpotPrice          string            `yaml:"workerSpotPrice"`
+	VPCID                    string            `yaml:"vpcId"`
+	RouteTableID             string            `yaml:"routeTableId"`
+	VPCCIDR                  string            `yaml:"vpcCIDR"`
+	InstanceCIDR             string            `yaml:"instanceCIDR"`
+	ControllerIP             string            `yaml:"controllerIP"`
+	PodCIDR                  string            `yaml:"podCIDR"`
+	ServiceCIDR              string            `yaml:"serviceCIDR"`
+	DNSServiceIP             string            `yaml:"dnsServiceIP"`
+	K8sVer                   string            `yaml:"kubernetesVersion"`
+	HyperkubeImageRepo       string            `yaml:"hyperkubeImageRepo"`
+	KMSKeyARN                string            `yaml:"kmsKeyArn"`
+	CreateRecordSet          bool              `yaml:"createRecordSet"`
+	RecordSetTTL             int               `yaml:"recordSetTTL"`
+	HostedZone               string            `yaml:"hostedZone"`
+	StackTags                map[string]string `yaml:"stackTags"`
 }
 
 const (
 	vpcLogicalName = "VPC"
 )
+
+var supportedReleaseChannels = map[string]bool{
+	"alpha":  true,
+	"beta":   true,
+	"stable": false,
+}
 
 func (c Cluster) Config() (*Config, error) {
 	config := Config{Cluster: c}
@@ -330,6 +335,31 @@ func (cfg Cluster) valid() error {
 	if cfg.ExternalDNSName == "" {
 		return errors.New("externalDNSName must be set")
 	}
+
+	releaseChannelSupported := supportedReleaseChannels[cfg.ReleaseChannel]
+	if !releaseChannelSupported {
+		return fmt.Errorf("releaseChannel %s is not supported", cfg.ReleaseChannel)
+	}
+
+	if cfg.CreateRecordSet {
+		if cfg.HostedZone == "" {
+			return errors.New("hostedZone cannot be blank when createRecordSet is true")
+		}
+		if cfg.RecordSetTTL < 1 {
+			return errors.New("TTL must be at least 1 second")
+		}
+		if !isSubdomain(cfg.ExternalDNSName, cfg.HostedZone) {
+			return fmt.Errorf("%s is not a subdomain of %s",
+				cfg.ExternalDNSName,
+				cfg.HostedZone)
+		}
+	} else {
+		if cfg.RecordSetTTL != newDefaultCluster().RecordSetTTL {
+			return errors.New(
+				"recordSetTTL should not be modified when createRecordSet is false",
+			)
+		}
+	}
 	if cfg.KeyName == "" {
 		return errors.New("keyName must be set")
 	}
@@ -490,10 +520,34 @@ func cidrOverlap(a, b *net.IPNet) bool {
 	return a.Contains(b.IP) || b.Contains(a.IP)
 }
 
-func withTrailingDot(s string) string {
+func WithTrailingDot(s string) string {
+	if s == "" {
+		return s
+	}
 	lastRune, _ := utf8.DecodeLastRuneInString(s)
 	if lastRune != rune('.') {
 		return s + "."
 	}
 	return s
+}
+
+func isSubdomain(sub, parent string) bool {
+	sub, parent = WithTrailingDot(sub), WithTrailingDot(parent)
+	subParts, parentParts := strings.Split(sub, "."), strings.Split(parent, ".")
+
+	if len(parentParts) > len(subParts) {
+		return false
+	}
+
+	subSuffixes := subParts[len(subParts)-len(parentParts):]
+
+	if len(subSuffixes) != len(parentParts) {
+		return false
+	}
+	for i := range subSuffixes {
+		if subSuffixes[i] != parentParts[i] {
+			return false
+		}
+	}
+	return true
 }
