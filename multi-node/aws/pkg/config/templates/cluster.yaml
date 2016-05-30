@@ -19,10 +19,15 @@ externalDNSName: {{.ExternalDNSName}}
 # TTL in seconds for the Route53 RecordSet created if createRecordSet is set to true.
 #recordSetTTL: 300
 
+# DEPRECATED: use hostedZoneId instead
 # The name of the hosted zone to add the externalDNSName to,
 # E.g: "google.com".  This needs to already exist, kube-aws will not create
 # it for you.
 #hostedZone: ""
+
+# The ID of hosted zone to add the externalDNSName to.
+# Either specify hostedZoneId or hostedZone, but not both
+#hostedZoneId: ""
 
 # Name of the SSH keypair already loaded into the AWS
 # account being used to deploy this cluster.
@@ -31,7 +36,7 @@ keyName: {{.KeyName}}
 # Region to provision Kubernetes cluster
 region: {{.Region}}
 
-# Availability Zone to provision Kubernetes cluster
+# Availability Zone to provision Kubernetes cluster when placing nodes in a single availability zone (not highly-available) Comment out for multi availability zone setting and use the below `subnets` section instead.
 availabilityZone: {{.AvailabilityZone}}
 
 # ARN of the KMS key used to encrypt TLS assets.
@@ -64,10 +69,17 @@ kmsKeyArn: "{{.KMSKeyARN}}"
 # CIDR for Kubernetes VPC. If vpcId is specified, must match the CIDR of existing vpc.
 # vpcCIDR: "10.0.0.0/16"
 
-# CIDR for Kubernetes subnet
+# CIDR for Kubernetes subnet when placing nodes in a single availability zone (not highly-available) Leave commented out for multi availability zone setting and use the below `subnets` section instead.
 # instanceCIDR: "10.0.0.0/24"
 
-# IP Address for controller in Kubernetes subnet
+# Kubernetes subnets with their CIDRs and availability zones. Differentiating availability zone for 2 or more subnets result in high-availability (failures of a single availability zone won't result in immediate downtimes)
+# subnets:
+#   - availabilityZone: us-west-1a
+#     instanceCIDR: "10.0.0.0/24"
+#   - availabilityZone: us-west-1b
+#     instanceCIDR: "10.0.1.0/24"
+
+# IP Address for the controller in Kubernetes subnet. When we have 2 or more subnets, the controller is placed in the first subnet and controllerIP must be included in the instanceCIDR of the first subnet. This convention will change once we have H/A controllers
 # controllerIP: 10.0.0.50
 
 # CIDR for all service IP addresses
@@ -80,10 +92,14 @@ kmsKeyArn: "{{.KMSKeyARN}}"
 # dnsServiceIP: 10.3.0.10
 
 # Version of hyperkube image to use. This is the tag for the hyperkube image repository.
-# kubernetesVersion: v1.2.2_coreos.0
+# kubernetesVersion: v1.2.4_coreos.1
 
 # Hyperkube image repository to use.
 # hyperkubeImageRepo: quay.io/coreos/hyperkube
+
+# Use Calico for network policy. When set to "true" the kubernetesVersion (above)
+# must also be updated to include a version tagged with CNI e.g. v1.2.4_coreos.cni.1
+# useCalico: false
 
 # AWS Tags for cloudformation stack resources 
 #stackTags:

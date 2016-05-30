@@ -40,7 +40,10 @@
     "AutoScaleWorker": {
       "Properties": {
         "AvailabilityZones": [
-          "{{.AvailabilityZone}}"
+          {{range $index, $subnet := .Subnets}}
+          {{if gt $index 0}},{{end}}
+          "{{$subnet.AvailabilityZone}}"
+          {{end}}
         ],
         "DesiredCapacity": "{{.WorkerCount}}",
         "HealthCheckGracePeriod": 600,
@@ -59,18 +62,23 @@
           {
             "Key": "Name",
             "PropagateAtLaunch": "true",
-            "Value": "kube-aws-worker"
+            "Value": "{{.ClusterName}}-kube-aws-worker"
           }
         ],
         "VPCZoneIdentifier": [
+          {{range $index, $subnet := .Subnets}}
+          {{with $subnetLogicalName := printf "Subnet%d" $index}}
+          {{if gt $index 0}},{{end}}
           {
-            "Ref": "Subnet"
+            "Ref": "{{$subnetLogicalName}}"
           }
+          {{end}}
+          {{end}}
         ]
       },
       "Type": "AWS::AutoScaling::AutoScalingGroup",
       "UpdatePolicy" : {
-	"AutoScalingRollingUpdate" : {
+        "AutoScalingRollingUpdate" : {
           "MinInstancesInService" :
           {{if .WorkerSpotPrice}}
           "0"
@@ -79,7 +87,7 @@
           {{end}},
           "MaxBatchSize" : "1",
           "PauseTime" : "PT2M"
-	}
+        }
       }
     },
     "EIPController": {
@@ -95,7 +103,11 @@
     "ExternalDNS": {
       "Type": "AWS::Route53::RecordSet",
       "Properties": {
+	{{ if .HostedZoneID }}
+        "HostedZoneId": "{{.HostedZoneID}}",
+	{{else}}
         "HostedZoneName": "{{.HostedZone}}",
+	{{ end }}
         "Name": "{{.ExternalDNSName}}",
         "TTL": {{.RecordSetTTL}},
         "ResourceRecords": [{ "Ref": "EIPController"}],
@@ -158,11 +170,11 @@
                   "Effect": "Allow",
                   "Resource": "*"
                 },
-		{
-		  "Action" : "kms:Decrypt",
-		  "Effect" : "Allow",
-		  "Resource" : "{{.KMSKeyARN}}"
-		}
+                {
+                  "Action" : "kms:Decrypt",
+                  "Effect" : "Allow",
+                  "Resource" : "{{.KMSKeyARN}}"
+                }
               ],
               "Version": "2012-10-17"
             },
@@ -214,6 +226,19 @@
                   "Action" : "kms:Decrypt",
                   "Effect" : "Allow",
                   "Resource" : "{{.KMSKeyARN}}"
+                },
+                {
+                  "Action": [
+                    "ecr:GetAuthorizationToken",
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:GetRepositoryPolicy",
+                    "ecr:DescribeRepositories",
+                    "ecr:ListImages",
+                    "ecr:BatchGetImage"
+                  ],
+                  "Resource": "*",
+                  "Effect": "Allow"
                 }
               ],
               "Version": "2012-10-17"
@@ -226,7 +251,7 @@
     },
     "InstanceController": {
       "Properties": {
-        "AvailabilityZone": "{{.AvailabilityZone}}",
+        "AvailabilityZone": "{{(index .Subnets .ControllerSubnetIndex).AvailabilityZone}}",
         "BlockDeviceMappings": [
           {
             "DeviceName": "/dev/xvda",
@@ -253,7 +278,7 @@
             ],
             "PrivateIpAddress": "{{.ControllerIP}}",
             "SubnetId": {
-              "Ref": "Subnet"
+              "Ref": "Subnet{{.ControllerSubnetIndex}}"
             }
           }
         ],
@@ -264,7 +289,7 @@
           },
           {
             "Key": "Name",
-            "Value": "kube-aws-controller"
+            "Value": "{{.ClusterName}}-kube-aws-controller"
           }
         ],
         "UserData": "{{ .UserDataController }}"
@@ -502,22 +527,27 @@
         "ToPort": 10255
       },
       "Type": "AWS::EC2::SecurityGroupIngress"
-    },
-    "Subnet": {
+    }
+    {{range $index, $subnet := .Subnets}}
+    {{with $subnetLogicalName := printf "Subnet%d" $index}}
+    ,
+    "{{$subnetLogicalName}}": {
       "Properties": {
-        "AvailabilityZone": "{{.AvailabilityZone}}",
-        "CidrBlock": "{{.InstanceCIDR}}",
+        "AvailabilityZone": "{{$subnet.AvailabilityZone}}",
+        "CidrBlock": "{{$subnet.InstanceCIDR}}",
         "MapPublicIpOnLaunch": true,
         "Tags": [
           {
             "Key": "KubernetesCluster",
-            "Value": "{{.ClusterName}}"
+            "Value": "{{$.ClusterName}}"
           }
         ],
-        "VpcId": {{.VPCRef}}
+        "VpcId": {{$.VPCRef}}
       },
       "Type": "AWS::EC2::Subnet"
     }
+    {{end}}
+    {{end}}
     {{if not .VPCID}}
     ,
     "{{.VPCLogicalName}}": {
@@ -580,28 +610,37 @@
         "VpcId": {{.VPCRef}}
       },
       "Type": "AWS::EC2::VPCGatewayAttachment"
-    },
-    "SubnetRouteTableAssociation": {
+    }
+    {{range $index, $subnet := .Subnets}}
+    {{with $subnetLogicalName := printf "Subnet%d" $index}}
+    ,
+    "{{$subnetLogicalName}}RouteTableAssociation": {
       "Properties": {
         "RouteTableId": { "Ref" : "RouteTable"},
         "SubnetId": {
-          "Ref": "Subnet"
+          "Ref": "{{$subnetLogicalName}}"
         }
       },
       "Type": "AWS::EC2::SubnetRouteTableAssociation"
     }
+    {{end}}
+    {{end}}
     {{else}}
     {{if .RouteTableID}}
+    {{range $index, $subnet := .Subnets}}
+    {{with $subnetLogicalName := printf "Subnet%d" $index}}
     ,
-    "SubnetRouteTableAssociation": {
+    "{{$subnetLogicalName}}RouteTableAssociation": {
       "Properties": {
         "RouteTableId": "{{.RouteTableID}}",
         "SubnetId": {
-          "Ref": "Subnet"
+          "Ref": "{{$subnetLogicalName}}"
         }
       },
       "Type": "AWS::EC2::SubnetRouteTableAssociation"
     }
+    {{end}}
+    {{end}}
     {{end}}
     {{end}}
 

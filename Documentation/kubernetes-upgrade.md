@@ -15,9 +15,24 @@ For example, modifying the `KUBELET_VERSION` environment variable in the followi
 **/etc/systemd/system/kubelet.service**
 
 ```
-Environment=KUBELET_VERSION=v1.2.2_coreos.0
+Environment=KUBELET_VERSION=v1.2.4_coreos.1
 ExecStart=/usr/lib/coreos/kubelet-wrapper \
   --api-servers=https://master [...]
+```
+
+## Upgrading Calico
+
+The Calico agent runs on both master and worker nodes, and is is distributed as a container image. It runs under rkt using systemd.
+
+To update the image version, change the image tag in the service file (`/etc/systemd/system/calico-node.service`) to reference the new calico-node image.
+
+
+**/etc/systemd/system/calico-node.service**
+```
+ExecStart=/usr/bin/rkt run --inherit-env --stage1-from-dir=stage1-fly.aci \
+--volume=modules,kind=host,source=/lib/modules,readOnly=false \
+--mount=volume=modules,target=/lib/modules \
+--trust-keys-from-https quay.io/calico/node:v0.19.0
 ```
 
 ## Upgrading Master Nodes
@@ -28,6 +43,7 @@ Master nodes consist of the following Kubernetes components:
 * kube-apiserver
 * kube-controller-manager
 * kube-scheduler
+* policy-agent
 
 While upgrading the master components, user pods on worker nodes will continue to run normally.
 
@@ -46,7 +62,7 @@ In high-availability deployments, the control-plane components (apiserver, sched
 
 ### Upgrading Worker Nodes
 
-Worker nodes will consist of the following kubernetes components.
+Worker nodes consist of the following kubernetes components.
 
 * kube-proxy
 

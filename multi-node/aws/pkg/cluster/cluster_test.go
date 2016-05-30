@@ -11,16 +11,44 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/route53"
 	"github.com/coreos/coreos-kubernetes/multi-node/aws/pkg/config"
+	yaml "gopkg.in/yaml.v2"
 )
 
-const minimalConfigYaml = `
+/*
+TODO(colhom): when we fully deprecate instanceCIDR/availabilityZone, this block of
+logic will go away and be replaced by a single constant string
+*/
+func defaultConfigValues(t *testing.T, configYaml string) string {
+	defaultYaml := `
 externalDNSName: test.staging.core-os.net
 keyName: test-key-name
 region: us-west-1
-availabilityZone: us-west-1c
 clusterName: test-cluster-name
 kmsKeyArn: "arn:aws:kms:us-west-1:xxxxxxxxx:key/xxxxxxxxxxxxxxxxxxx"
 `
+	yamlStr := defaultYaml + configYaml
+
+	c := config.Cluster{}
+	if err := yaml.Unmarshal([]byte(yamlStr), &c); err != nil {
+		t.Errorf("failed umarshalling config yaml: %v :\n%s", err, yamlStr)
+	}
+
+	if len(c.Subnets) > 0 {
+		for i := range c.Subnets {
+			c.Subnets[i].AvailabilityZone = fmt.Sprintf("dummy-az-%d", i)
+		}
+	} else {
+		//Legacy behavior
+		c.AvailabilityZone = "dummy-az-0"
+	}
+
+	out, err := yaml.Marshal(&c)
+	if err != nil {
+		t.Errorf("error marshalling cluster: %v", err)
+	}
+
+	return string(out)
+}
 
 type VPC struct {
 	cidr        string
@@ -103,6 +131,14 @@ vpcCIDR: 192.168.1.0/24
 vpcId: vpc-xxx2
 instanceCIDR: 192.168.1.50/28
 controllerIP: 192.168.1.50
+`, `
+vpcCIDR: 192.168.1.0/24
+vpcId: vpc-xxx2
+controllerIP: 192.168.1.5
+subnets:
+  - instanceCIDR: 192.168.1.0/28
+  - instanceCIDR: 192.168.1.32/28
+  - instanceCIDR: 192.168.1.64/28
 `,
 	}
 
@@ -131,6 +167,14 @@ instanceCIDR: 192.168.1.100/26 #instance cidr conflicts with existing subnet
 controllerIP: 192.168.1.80
 vpcId: vpc-xxx2
 routeTableId: rtb-xxxxxx
+`, `
+vpcCIDR: 192.168.1.0/24
+controllerIP: 192.168.1.80
+vpcId: vpc-xxx2
+routeTableId: rtb-xxxxxx
+subnets:
+  - instanceCIDR: 192.168.1.100/26  #instance cidr conflicts with existing subnet
+  - instanceCIDR: 192.168.1.0/26
 `,
 	}
 
@@ -156,7 +200,7 @@ routeTableId: rtb-xxxxxx
 	}
 
 	validateCluster := func(networkConfig string) error {
-		configBody := minimalConfigYaml + networkConfig
+		configBody := defaultConfigValues(t, networkConfig)
 		clusterConfig, err := config.ClusterFromBytes([]byte(configBody))
 		if err != nil {
 			t.Errorf("could not get valid cluster config: %v", err)
@@ -185,7 +229,7 @@ routeTableId: rtb-xxxxxx
 
 func TestValidateKeyPair(t *testing.T) {
 
-	clusterConfig, err := config.ClusterFromBytes([]byte(minimalConfigYaml))
+	clusterConfig, err := config.ClusterFromBytes([]byte(defaultConfigValues(t, "")))
 	if err != nil {
 		t.Errorf("could not get valid cluster config: %v", err)
 	}
@@ -220,7 +264,7 @@ type dummyR53Service struct {
 func (r53 dummyR53Service) ListHostedZonesByName(input *route53.ListHostedZonesByNameInput) (*route53.ListHostedZonesByNameOutput, error) {
 	output := &route53.ListHostedZonesByNameOutput{}
 	for _, zone := range r53.HostedZones {
-		if zone.DNS == config.WithTrailingDot(*input.DNSName) {
+		if zone.DNS == config.WithTrailingDot(aws.StringValue(input.DNSName)) {
 			output.HostedZones = append(output.HostedZones, &route53.HostedZone{
 				Name: aws.String(zone.DNS),
 				Id:   aws.String(zone.Id),
@@ -232,7 +276,7 @@ func (r53 dummyR53Service) ListHostedZonesByName(input *route53.ListHostedZonesB
 
 func (r53 dummyR53Service) ListResourceRecordSets(input *route53.ListResourceRecordSetsInput) (*route53.ListResourceRecordSetsOutput, error) {
 	output := &route53.ListResourceRecordSetsOutput{}
-	if name, ok := r53.ResourceRecordSets[*input.HostedZoneId]; ok {
+	if name, ok := r53.ResourceRecordSets[aws.StringValue(input.HostedZoneId)]; ok {
 		output.ResourceRecordSets = []*route53.ResourceRecordSet{
 			&route53.ResourceRecordSet{
 				Name: aws.String(name),
@@ -242,46 +286,154 @@ func (r53 dummyR53Service) ListResourceRecordSets(input *route53.ListResourceRec
 	return output, nil
 }
 
-func TestValidateDNSConfig(t *testing.T) {
-	dnsConfig := `
-createRecordSet: true
-recordSetTTL: 60
-hostedZone: staging.core-os.net
-`
-
-	configBody := minimalConfigYaml + dnsConfig
-	clusterConfig, err := config.ClusterFromBytes([]byte(configBody))
-	if err != nil {
-		t.Errorf("could not get valid cluster config: %v", err)
+func (r53 dummyR53Service) GetHostedZone(input *route53.GetHostedZoneInput) (*route53.GetHostedZoneOutput, error) {
+	for _, zone := range r53.HostedZones {
+		if zone.Id == aws.StringValue(input.Id) {
+			return &route53.GetHostedZoneOutput{
+				HostedZone: &route53.HostedZone{
+					Id:   aws.String(zone.Id),
+					Name: aws.String(zone.DNS),
+				},
+			}, nil
+		}
 	}
-	c := &Cluster{Cluster: *clusterConfig}
+	return nil, fmt.Errorf("dummy route53 service: no hosted zone with id '%s'", aws.StringValue(input.Id))
+}
 
+func TestValidateDNSConfig(t *testing.T) {
 	r53 := dummyR53Service{
 		HostedZones: []Zone{
-			Zone{
-				Id:  "staging_id",
+			{
+				Id:  "/hostedzone/staging_id_1",
 				DNS: "staging.core-os.net.",
+			},
+			{
+				Id:  "/hostedzone/staging_id_2",
+				DNS: "staging.core-os.net.",
+			},
+			{
+				Id:  "/hostedzone/staging_id_3",
+				DNS: "zebras.coreos.com.",
+			},
+			{
+				Id:  "/hostedzone/staging_id_4",
+				DNS: "core-os.net.",
 			},
 		},
 		ResourceRecordSets: map[string]string{
-			"staging_id": "existing-record.staging.core-os.net.",
+			"staging_id_1": "existing-record.staging.core-os.net.",
 		},
 	}
 
-	if err := c.validateDNSConfig(r53); err != nil {
-		t.Errorf("returned error for valid config: %v", err)
+	validDNSConfigs := []string{
+		`
+createRecordSet: true
+recordSetTTL: 60
+hostedZone: core-os.net
+`, `
+createRecordSet: true
+recordSetTTL: 60
+hostedZoneId: staging_id_1
+`, `
+createRecordSet: true
+recordSetTTL: 60
+hostedZoneId: /hostedzone/staging_id_2
+`,
 	}
 
-	c.HostedZone = "non-existant-zone"
-	if err := c.validateDNSConfig(r53); err == nil {
-		t.Errorf("failed to catch non-existent hosted zone")
+	invalidDNSConfigs := []string{
+		`
+createRecordSet: true
+recordSetTTL: 60
+hostedZone: staging.core-os.net # hostedZone is ambiguous
+`, `
+createRecordSet: true
+recordSetTTL: 60
+hostedZoneId: /hostedzone/staging_id_3 # <staging_id_id> is not a super-domain
+`, `
+createRecordSet: true
+recordSetTTL: 60
+hostedZone: zebras.coreos.com # zebras.coreos.com is not a super-domain
+`, `
+createRecordSet: true
+recordSetTTL: 60
+hostedZoneId: /hostedzone/staging_id_5 #non-existant hostedZoneId
+`, `
+createRecordSet: true
+recordSetTTL: 60
+hostedZone: unicorns.core-os.net  #non-existant hostedZone DNS name
+`,
 	}
 
-	c.HostedZone = "staging.core-os.net"
-	c.ExternalDNSName = "existing-record.staging.core-os.net"
-	if err := c.validateDNSConfig(r53); err == nil {
-		t.Errorf("failed to catch already existing ExternalDNSName")
+	for _, validConfig := range validDNSConfigs {
+		configBody := defaultConfigValues(t, validConfig)
+		clusterConfig, err := config.ClusterFromBytes([]byte(configBody))
+		if err != nil {
+			t.Errorf("could not get valid cluster config: %v", err)
+			continue
+		}
+		c := &Cluster{Cluster: *clusterConfig}
+
+		if err := c.validateDNSConfig(r53); err != nil {
+			t.Errorf("returned error for valid config: %v", err)
+		}
 	}
+
+	for _, invalidConfig := range invalidDNSConfigs {
+		configBody := defaultConfigValues(t, invalidConfig)
+		clusterConfig, err := config.ClusterFromBytes([]byte(configBody))
+		if err != nil {
+			t.Errorf("could not get valid cluster config: %v", err)
+			continue
+		}
+		c := &Cluster{Cluster: *clusterConfig}
+
+		if err := c.validateDNSConfig(r53); err == nil {
+			t.Errorf("failed to produce error for invalid config: %s", configBody)
+		}
+	}
+
+}
+
+type dummyCloudformationService struct {
+	ExpectedTags []*cloudformation.Tag
+	StackEvents  []*cloudformation.StackEvent
+	StackStatus  string
+}
+
+func (cfSvc *dummyCloudformationService) CreateStack(req *cloudformation.CreateStackInput) (*cloudformation.CreateStackOutput, error) {
+
+	if len(cfSvc.ExpectedTags) != len(req.Tags) {
+		return nil, fmt.Errorf(
+			"expected tag count does not match supplied tag count\nexpected=%v, supplied=%v",
+			cfSvc.ExpectedTags,
+			req.Tags,
+		)
+	}
+
+	matchCnt := 0
+	for _, eTag := range cfSvc.ExpectedTags {
+		for _, tag := range req.Tags {
+			if *tag.Key == *eTag.Key && *tag.Value == *eTag.Value {
+				matchCnt++
+				break
+			}
+		}
+	}
+
+	if matchCnt != len(cfSvc.ExpectedTags) {
+		return nil, fmt.Errorf(
+			"not all tags matched\nexpected=%v, observed=%v",
+			cfSvc.ExpectedTags,
+			req.Tags,
+		)
+	}
+
+	resp := &cloudformation.CreateStackOutput{
+		StackId: req.StackName,
+	}
+
+	return resp, nil
 }
 
 func TestStackTags(t *testing.T) {
@@ -320,8 +472,7 @@ stackTags:
 	}
 
 	for _, testCase := range testCases {
-
-		configBody := minimalConfigYaml + testCase.clusterYaml
+		configBody := defaultConfigValues(t, testCase.clusterYaml)
 		clusterConfig, err := config.ClusterFromBytes([]byte(configBody))
 		if err != nil {
 			t.Errorf("could not get valid cluster config: %v", err)
@@ -344,41 +495,110 @@ stackTags:
 	}
 }
 
-type dummyCloudformationService struct {
-	ExpectedTags []*cloudformation.Tag
-}
-
-func (cfSvc *dummyCloudformationService) CreateStack(req *cloudformation.CreateStackInput) (*cloudformation.CreateStackOutput, error) {
-
-	if len(cfSvc.ExpectedTags) != len(req.Tags) {
-		return nil, fmt.Errorf(
-			"expected tag count does not match supplied tag count\nexpected=%v, supplied=%v",
-			cfSvc.ExpectedTags,
-			req.Tags,
-		)
+func TestStackCreationErrorMessaging(t *testing.T) {
+	events := []*cloudformation.StackEvent{
+		&cloudformation.StackEvent{
+			// Failure with all fields set
+			ResourceStatus:       aws.String("CREATE_FAILED"),
+			ResourceType:         aws.String("Computer"),
+			LogicalResourceId:    aws.String("test_comp"),
+			ResourceStatusReason: aws.String("BAD HD"),
+		},
+		&cloudformation.StackEvent{
+			// Success, should not show up
+			ResourceStatus: aws.String("SUCCESS"),
+			ResourceType:   aws.String("Computer"),
+		},
+		&cloudformation.StackEvent{
+			// Failure due to cancellation should not show up
+			ResourceStatus:       aws.String("CREATE_FAILED"),
+			ResourceType:         aws.String("Computer"),
+			ResourceStatusReason: aws.String("Resource creation cancelled"),
+		},
+		&cloudformation.StackEvent{
+			// Failure with missing fields
+			ResourceStatus: aws.String("CREATE_FAILED"),
+			ResourceType:   aws.String("Computer"),
+		},
 	}
 
-	matchCnt := 0
-	for _, eTag := range cfSvc.ExpectedTags {
-		for _, tag := range req.Tags {
-			if *tag.Key == *eTag.Key && *tag.Value == *eTag.Value {
-				matchCnt++
-				break
-			}
+	expectedMsgs := []string{
+		"CREATE_FAILED Computer test_comp BAD HD",
+		"CREATE_FAILED Computer",
+	}
+
+	outputMsgs := stackEventErrMsgs(events)
+	if len(expectedMsgs) != len(outputMsgs) {
+		t.Errorf("Expected %d stack error messages, got %d\n",
+			len(expectedMsgs),
+			len(stackEventErrMsgs(events)))
+	}
+
+	for i := range expectedMsgs {
+		if expectedMsgs[i] != outputMsgs[i] {
+			t.Errorf("Expected `%s`, got `%s`\n", expectedMsgs[i], outputMsgs[i])
+		}
+	}
+}
+
+func TestIsSubdomain(t *testing.T) {
+	validData := []struct {
+		sub    string
+		parent string
+	}{
+		{
+			// single level
+			sub:    "test.coreos.com",
+			parent: "coreos.com",
+		},
+		{
+			// multiple levels
+			sub:    "cgag.staging.coreos.com",
+			parent: "coreos.com",
+		},
+		{
+			// trailing dots shouldn't matter
+			sub:    "staging.coreos.com.",
+			parent: "coreos.com.",
+		},
+		{
+			// trailing dots shouldn't matter
+			sub:    "a.b.c.",
+			parent: "b.c",
+		},
+		{
+			// multiple level parent domain
+			sub:    "a.b.c.staging.core-os.net",
+			parent: "staging.core-os.net",
+		},
+	}
+
+	invalidData := []struct {
+		sub    string
+		parent string
+	}{
+		{
+			// mismatch
+			sub:    "staging.coreos.com",
+			parent: "example.com",
+		},
+		{
+			// superdomain is longer than subdomain
+			sub:    "staging.coreos.com",
+			parent: "cgag.staging.coreos.com",
+		},
+	}
+
+	for _, valid := range validData {
+		if !isSubdomain(valid.sub, valid.parent) {
+			t.Errorf("%s should be a valid subdomain of %s", valid.sub, valid.parent)
 		}
 	}
 
-	if matchCnt != len(cfSvc.ExpectedTags) {
-		return nil, fmt.Errorf(
-			"not all tags matched\nexpected=%v, observed=%v",
-			cfSvc.ExpectedTags,
-			req.Tags,
-		)
+	for _, invalid := range invalidData {
+		if isSubdomain(invalid.sub, invalid.parent) {
+			t.Errorf("%s should not be a valid subdomain of %s", invalid.sub, invalid.parent)
+		}
 	}
 
-	resp := &cloudformation.CreateStackOutput{
-		StackId: req.StackName,
-	}
-
-	return resp, nil
 }
